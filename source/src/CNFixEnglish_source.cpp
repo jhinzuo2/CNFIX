@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <cctype>
+#include <cmath>
 #include "MinHook.h"
 #include "wnr_common.h"
 #include "pinyin_map.h"
@@ -263,6 +264,9 @@ struct CnfixCfg {
                                //   WT can read raw zh -> contextual never gets cached). Still
                                //   available as opt-in for users who need it for tooltip/nameplate
                                //   stickiness, but the default is the safer route.
+    float nameScale  = 1.0f;  // floating overhead name size multiplier (1.0 = default)
+    float nameThresh = 1.0f;  // distance threshold multiplier (1.0 = default 4.0 units)
+    float nameDistMul= 1.0f;  // distance growth multiplier (1.0 = default 0.3x)
 };
 static CnfixCfg g_cfg;
 // Globals that wnr_common.h reads via extern (kept volatile so addon flips
@@ -279,8 +283,12 @@ volatile bool g_surface_nameplates  = false;
 // and remains a no-op; do not set it true (that would wrongly disable the glue).
 static volatile bool g_cpp_hook_active = false;
 static const char* CFG = "\1CNFXCFG\1";   // config control: \1CNFXCFG\1<6 chars 0/1>
+static const char* CFGSCALE = "\1CNFXSCALE\1";   // scale control: \1CNFXSCALE\1<3 digits> (050..300)
+static const char* CFGTHRESH = "\1CNFXTHRS\1";  // threshold control: \1CNFXTHRS\1<3 digits> (020..300)
+static const char* CFGDIST  = "\1CNFXDIST\1";   // dist-mult control: \1CNFXDIST\1<3 digits> (020..300)
 static bool learn(const std::string& zh, const std::string& en); // fwd
 static void invalidate_cache(const std::string& zh);             // fwd
+static void fn_apply_scale();                                    // fwd (floating name scaler)
 static bool try_push(const char* t){
     // Config control: \1CNFXCFG\1 followed by flag chars (master,social,
     // unitframes,groupfinder,realtime,pinyin,overhead,tooltipOwnedByOther),
@@ -318,10 +326,58 @@ static bool try_push(const char* t){
         }
         return true;
     }
-    // (The floating-name size scaler was extracted to a standalone project
-    // -- "FloatingNames.dll" -- as an accessibility tool. CNFix no longer
-    // ships the scaler. The 8th CFG flag slot above is kept for protocol
-    // back-compat but is unused.)
+    // Floating name scale: \1CNFXSCALE\1 followed by 3 digits (050..300 = 0.50x..3.00x).
+    // Patches the 0.2f base scale constant inside FUN_006c6e90 at runtime.
+    size_t sclen=strlen(CFGSCALE);
+    if(strncmp(t,CFGSCALE,sclen)==0){
+        const char* d=t+sclen;
+        if(strlen(d)>=3){
+            int v=0; for(int i=0;i<3;++i){ if(d[i]<'0'||d[i]>'9') break; v=v*10+(d[i]-'0'); }
+            if(v>=50 && v<=300){
+                float ns=(float)v/100.0f;
+                if(fabs(ns - g_cfg.nameScale) > 0.001f){
+                    g_cfg.nameScale=ns;
+                    fn_apply_scale();
+                    wnr_log("nameScale: set to %.2f", g_cfg.nameScale);
+                }
+            }
+        }
+        return true;
+    }
+    // Floating name distance threshold: \1CNFXTHRS\1<3 digits> (020..300 = 0.20x..3.00x).
+    size_t thlen=strlen(CFGTHRESH);
+    if(strncmp(t,CFGTHRESH,thlen)==0){
+        const char* d=t+thlen;
+        if(strlen(d)>=3){
+            int v=0; for(int i=0;i<3;++i){ if(d[i]<'0'||d[i]>'9') break; v=v*10+(d[i]-'0'); }
+            if(v>=20 && v<=300){
+                float ns=(float)v/100.0f;
+                if(fabs(ns - g_cfg.nameThresh) > 0.001f){
+                    g_cfg.nameThresh=ns;
+                    fn_apply_scale();
+                    wnr_log("nameThresh: set to %.2f", g_cfg.nameThresh);
+                }
+            }
+        }
+        return true;
+    }
+    // Floating name distance multiplier: \1CNFXDIST\1<3 digits> (020..300 = 0.20x..3.00x).
+    size_t dllen=strlen(CFGDIST);
+    if(strncmp(t,CFGDIST,dllen)==0){
+        const char* d=t+dllen;
+        if(strlen(d)>=3){
+            int v=0; for(int i=0;i<3;++i){ if(d[i]<'0'||d[i]>'9') break; v=v*10+(d[i]-'0'); }
+            if(v>=20 && v<=300){
+                float ns=(float)v/100.0f;
+                if(fabs(ns - g_cfg.nameDistMul) > 0.001f){
+                    g_cfg.nameDistMul=ns;
+                    fn_apply_scale();
+                    wnr_log("nameDistMul: set to %.2f", g_cfg.nameDistMul);
+                }
+            }
+        }
+        return true;
+    }
     size_t clen=strlen(CTRL);
     if(strncmp(t,CTRL,clen)!=0) return false;
     const char* rest=t+clen; const char* sep=strchr(rest,'\1');
@@ -1379,6 +1435,206 @@ static void __fastcall hk_petTpl(void* pet, char* outBuf, int cap){
         memcpy(outBuf, r.c_str(), r.size()+1);
     }
 }
+
+// ================= FLOATING NAME SIZE SCALER =================
+// Scales the overhead/floating name size by a user-configurable factor.
+//
+// HOW IT WORKS:
+// The WoW 1.12.1 (5875) client renders overhead names in FUN_006c6e90.
+// The function computes a scale factor (local_8):
+//   - Close range (dist <= 4.0): local_8 = 0.2f
+//   - Far range  (dist >  4.0): local_8 = (dist / 4.0) * 1.5 * 0.2
+//
+// Assembly layout (Ghidra-confirmed for build 5875):
+//   006c6f16  MOV [EBP+local_8], 0x3e4ccccd    ; 0.2f immediate (close-range default)
+//   006c6f1d  FCOM [DAT_008112a8]               ; compare with 4.0f
+//   006c6f2a  FDIV [DAT_008112a8]               ; divide by 4.0f
+//   006c6f30  FMUL [DAT_008112ac]               ; multiply by 1.5f
+//   006c6f36  FMUL [DAT_0080679c]               ; multiply by 0.2f (.rdata copy)
+//
+// Three independent user sliders map to these constants:
+//   Name Scale   → 0.2f (immediate + .rdata): overall name SIZE
+//   Range        → 4.0f (.rdata): how FAR names stay at full size
+//   Dist Growth  → 1.5f (.rdata): how FAST names grow beyond threshold
+//
+// The 0.2f immediate is found by pattern-scanning the function body.
+// The .rdata constants are at hardcoded addresses with value validation
+// (self-gating: mismatch = dormant, stable build unaffected).
+//
+// SAFETY: VirtualProtect for write access; original values restored on detach.
+
+// ---- Pattern scan: 0.2f immediate embedded in the function body ----
+static const uintptr_t FN_FUNC_ADDR = 0x006c6e90;
+static const size_t    FN_FUNC_SIZE = 0x600;
+static const unsigned char FN_BASE_PATTERN[4] = { 0xCD, 0xCC, 0x4C, 0x3E }; // 0.2f
+
+// ---- Hardcoded .rdata addresses (Ghidra-confirmed for build 5875) ----
+// Each has an expected value for validation. If the value doesn't match
+// (wrong client build), that slot is skipped and the slider becomes a no-op.
+
+// 4.0f distance threshold: used in FCOM (comparison) and FDIV (division).
+static const uintptr_t FN_RDATA_THRESH = 0x008112a8;
+static const float     FN_RDATA_THRESH_EXPECTED = 4.0f;
+
+// 1.5f distance growth multiplier: used in FMUL after the FDIV.
+static const uintptr_t FN_RDATA_DISTMUL = 0x008112ac;
+static const float     FN_RDATA_DISTMUL_EXPECTED = 1.5f;
+
+// 0.2f base scale (.rdata copy): used in the final FMUL of the distance formula.
+static const uintptr_t FN_RDATA_BASE = 0x0080679c;
+static const float     FN_RDATA_BASE_EXPECTED = 0.2f;
+
+// ---- Patch slots ----
+struct FnPatchSlot {
+    uintptr_t addr;
+    float     origFloat;
+};
+static const int FN_MAX_SLOTS = 4;
+
+// 0.2f instances (both the immediate in code and the .rdata copy)
+static FnPatchSlot g_fnBaseSlots[FN_MAX_SLOTS];
+static int         g_fnBaseCount = 0;
+
+// 4.0f threshold (.rdata)
+static FnPatchSlot g_fnThreshSlots[1];
+static int         g_fnThreshCount = 0;
+
+// 1.5f distance multiplier (.rdata)
+static FnPatchSlot g_fnDistSlots[1];
+static int         g_fnDistCount = 0;
+
+static bool g_fnPatched = false;
+
+// Scan a memory range for a 4-byte pattern.
+static int fn_scan_pattern(uintptr_t start, size_t len,
+                           const unsigned char pattern[4],
+                           uintptr_t* out, int maxOut){
+    int found = 0;
+    const unsigned char* p = (const unsigned char*)start;
+    for(size_t i = 0; i + 3 < len && found < maxOut; ++i){
+        if(p[i] == pattern[0] && p[i+1] == pattern[1]
+           && p[i+2] == pattern[2] && p[i+3] == pattern[3]){
+            out[found++] = start + i;
+        }
+    }
+    return found;
+}
+
+// Validate a .rdata address: readable and value matches expected.
+static bool fn_validate_rdata(uintptr_t addr, float expected, const char* label){
+    if(IsBadReadPtr((void*)addr, sizeof(float))){
+        wnr_log("nameScale: %s @ 0x%08X unreadable -> skipped", label, (unsigned)addr);
+        return false;
+    }
+    float val = *(float*)addr;
+    if(fabs(val - expected) > 0.01f){
+        wnr_log("nameScale: %s @ 0x%08X mismatch: got %.2f, expected %.2f -> skipped",
+                label, (unsigned)addr, val, expected);
+        return false;
+    }
+    return true;
+}
+
+// Write a float to a code/data address using VirtualProtect.
+static bool fn_write_float(uintptr_t addr, float val){
+    if(IsBadReadPtr((void*)addr, sizeof(float))) return false;
+    DWORD oldProtect;
+    if(!VirtualProtect((void*)addr, sizeof(float), PAGE_READWRITE, &oldProtect))
+        return false;
+    *(float*)addr = val;
+    VirtualProtect((void*)addr, sizeof(float), oldProtect, &oldProtect);
+    return true;
+}
+
+// Apply the current scale to all discovered constant slots.
+// Three independent multipliers:
+//   nameScale   → 0.2f: controls overall name SIZE
+//   nameThresh  → 4.0f: controls how FAR names stay full-size
+//   nameDistMul → 1.5f: controls how FAST names grow with distance
+static void fn_apply_scale(){
+    if(!g_fnPatched) return;
+    float s = g_cfg.nameScale;
+    if(s < 0.1f) s = 0.1f;
+    if(s > 5.0f) s = 5.0f;
+    float ts = g_cfg.nameThresh;
+    if(ts < 0.1f) ts = 0.1f;
+    if(ts > 5.0f) ts = 5.0f;
+    float ds = g_cfg.nameDistMul;
+    if(ds < 0.1f) ds = 0.1f;
+    if(ds > 5.0f) ds = 5.0f;
+    for(int i = 0; i < g_fnBaseCount; ++i){
+        fn_write_float(g_fnBaseSlots[i].addr, g_fnBaseSlots[i].origFloat * s);
+    }
+    for(int i = 0; i < g_fnThreshCount; ++i){
+        fn_write_float(g_fnThreshSlots[i].addr, g_fnThreshSlots[i].origFloat * ts);
+    }
+    for(int i = 0; i < g_fnDistCount; ++i){
+        fn_write_float(g_fnDistSlots[i].addr, g_fnDistSlots[i].origFloat * ds);
+    }
+    wnr_log("nameScale: applied scale=%.2f thresh=%.2f dist=%.2f", s, ts, ds);
+}
+
+// Restore the original constant values. Called on DLL detach.
+static void fn_restore(){
+    if(!g_fnPatched) return;
+    for(int i = 0; i < g_fnBaseCount; ++i)
+        fn_write_float(g_fnBaseSlots[i].addr, g_fnBaseSlots[i].origFloat);
+    for(int i = 0; i < g_fnThreshCount; ++i)
+        fn_write_float(g_fnThreshSlots[i].addr, g_fnThreshSlots[i].origFloat);
+    for(int i = 0; i < g_fnDistCount; ++i)
+        fn_write_float(g_fnDistSlots[i].addr, g_fnDistSlots[i].origFloat);
+    g_fnPatched = false;
+    wnr_log("nameScale: restored original constants");
+}
+
+// Install the scaler: scan for 0.2f immediate, validate .rdata addresses.
+static void fn_install(){
+    if(IsBadReadPtr((void*)FN_FUNC_ADDR, 16)){
+        wnr_log("nameScale: overhead renderer @0x%08X unreadable -> DORMANT", (unsigned)FN_FUNC_ADDR);
+        return;
+    }
+    // 1) Pattern-scan the function body for the 0.2f immediate.
+    uintptr_t baseHits[FN_MAX_SLOTS];
+    g_fnBaseCount = fn_scan_pattern(FN_FUNC_ADDR, FN_FUNC_SIZE,
+                                     FN_BASE_PATTERN, baseHits, FN_MAX_SLOTS);
+    if(g_fnBaseCount == 0){
+        wnr_log("nameScale: 0.2f immediate NOT found -> DORMANT (stable build unaffected)");
+        return;
+    }
+    for(int i = 0; i < g_fnBaseCount; ++i){
+        g_fnBaseSlots[i].addr = baseHits[i];
+        g_fnBaseSlots[i].origFloat = *(float*)baseHits[i];
+    }
+
+    // 2) Validate and add the .rdata copy of 0.2f (used in FMUL).
+    if(fn_validate_rdata(FN_RDATA_BASE, FN_RDATA_BASE_EXPECTED, "0.2f rdata")){
+        g_fnBaseSlots[g_fnBaseCount].addr = FN_RDATA_BASE;
+        g_fnBaseSlots[g_fnBaseCount].origFloat = *(float*)FN_RDATA_BASE;
+        g_fnBaseCount++;
+    }
+
+    // 3) Validate and add the 4.0f threshold (FCOM + FDIV).
+    if(fn_validate_rdata(FN_RDATA_THRESH, FN_RDATA_THRESH_EXPECTED, "4.0f thresh")){
+        g_fnThreshSlots[0].addr = FN_RDATA_THRESH;
+        g_fnThreshSlots[0].origFloat = *(float*)FN_RDATA_THRESH;
+        g_fnThreshCount = 1;
+    }
+
+    // 4) Validate and add the 1.5f distance multiplier (FMUL).
+    if(fn_validate_rdata(FN_RDATA_DISTMUL, FN_RDATA_DISTMUL_EXPECTED, "1.5f dist")){
+        g_fnDistSlots[0].addr = FN_RDATA_DISTMUL;
+        g_fnDistSlots[0].origFloat = *(float*)FN_RDATA_DISTMUL;
+        g_fnDistCount = 1;
+    }
+
+    g_fnPatched = true;
+    if(g_cfg.nameScale != 1.0f || g_cfg.nameThresh != 1.0f || g_cfg.nameDistMul != 1.0f)
+        fn_apply_scale();
+    wnr_log("nameScale: ARMED (%d x 0.2f + %d x 4.0f + %d x 1.5f, scale=%.2f thresh=%.2f dist=%.2f)",
+            g_fnBaseCount, g_fnThreshCount, g_fnDistCount,
+            g_cfg.nameScale, g_cfg.nameThresh, g_cfg.nameDistMul);
+}
+
 static const WnrSig kSig[] = {
     {0x0079D760,{0xa1,0xcc,0x2c,0xcf,0x00,0x85,0xc0,0x56},"SetText"},
     {0x0048A420,{0x55,0x8b,0xec,0x83,0xec,0x18,0x56,0x57},"InviteByName"},
@@ -1685,12 +1941,11 @@ static DWORD WINAPI init(LPVOID){
           wnr_log("pet-owner template hook ARMED (builder@52fd30)");
       } else wnr_log("pet-owner template hook SKIPPED (builder@52fd30 sig mismatch)");
     }
-    // (The floating-name size scaler lives in its own DLL now -- "FloatingNames.dll"
-    // -- a dedicated accessibility-focused side project. CNFix no longer installs
-    // any code-patching trampolines; it's a pure name-translation layer again.)
+    // Floating name size scaler: patches the overhead name base scale constant.
+    // Auto-discovers the 0.2f constant by scanning FUN_006c6e90 at runtime.
+    // Self-gating: if the pattern isn't found, stays dormant.
+    fn_install();
     // (v2.5.8+) Attempt the deep C++ leaf SetText hook if user opted in.
-    // No-op if g_cfg.deepHook is false (default). Discovery-based and
-    // safety-gated; bails silently if anything looks wrong.
     maybe_install_deep_hook();
     wnr_log("CNFixEnglish hooks installed: layered meaning swap + 7 action hooks");
     CreateThread(0,0,wtf_thread,0,0,0);
@@ -1698,6 +1953,6 @@ static DWORD WINAPI init(LPVOID){
 }
 BOOL WINAPI DllMain(HINSTANCE h,DWORD r,LPVOID){
     if(r==DLL_PROCESS_ATTACH){ DisableThreadLibraryCalls(h); wnr_log_init(h); wnr_log("attach"); CreateThread(0,0,init,0,0,0); }
-    else if(r==DLL_PROCESS_DETACH){ MH_DisableHook(MH_ALL_HOOKS); MH_Uninitialize(); }
+    else if(r==DLL_PROCESS_DETACH){ fn_restore(); MH_DisableHook(MH_ALL_HOOKS); MH_Uninitialize(); }
     return TRUE;
 }

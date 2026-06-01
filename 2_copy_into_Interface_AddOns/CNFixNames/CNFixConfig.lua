@@ -4,6 +4,9 @@
 -- name-style radio. Master ("CNFix") greys out the rest when off (state kept).
 
 local CFG_CTRL = "\1CNFXCFG\1"
+local CFG_SCALE = "\1CNFXSCALE\1"
+local CFG_THRESH = "\1CNFXTHRS\1"
+local CFG_DIST  = "\1CNFXDIST\1"
 
 -- ---- defaults: everything ON, English mode ----
 local DEFAULTS = {
@@ -27,6 +30,9 @@ local DEFAULTS = {
   -- the two addons fighting over the tooltip name line. Nameplates default ON.
   surfaceTooltips   = false,
   surfaceNameplates = true,
+  nameScale         = 1.0,       -- floating overhead name size (0.5x = half, 2.0 = double)
+  nameThresh        = 1.0,       -- distance threshold (1.0 = default 4.0 units; higher = bigger uniform zone)
+  nameDistMul       = 1.0,       -- distance growth rate (1.0 = default 0.3x; higher = faster growth at range)
 }
 
 local function DB()
@@ -169,10 +175,61 @@ local function PushConfig()
 end
 CNFix_PushConfig = PushConfig   -- exposed so the main file can push on load
 
+-- ---- push name scale to the DLL ----
+local scalePusher
+local function PushScale()
+  local db = DB()
+  if not scalePusher then
+    local f = CreateFrame("Frame"); f:Hide()
+    scalePusher = f:CreateFontString(nil, "BACKGROUND")
+    scalePusher:SetFont("Fonts\\FRIZQT__.TTF", 10)
+    if not scalePusher:GetFont() then scalePusher:SetFont("Fonts\\ARIALN.TTF", 10) end
+  end
+  -- Encode scale as 3 digits: 050..300 (0.50x..3.00x)
+  local v = math.floor((db.nameScale or 1.0) * 100 + 0.5)
+  if v < 50 then v = 50 end
+  if v > 300 then v = 300 end
+  local s = CFG_SCALE .. string.format("%03d", v)
+  pcall(function() scalePusher:SetText(s) end)
+end
+
+local function PushThresh()
+  local db = DB()
+  if not threshPusher then
+    local f = CreateFrame("Frame"); f:Hide()
+    threshPusher = f:CreateFontString(nil, "BACKGROUND")
+    threshPusher:SetFont("Fonts\\FRIZQT__.TTF", 10)
+    if not threshPusher:GetFont() then threshPusher:SetFont("Fonts\\ARIALN.TTF", 10) end
+  end
+  local v = math.floor((db.nameThresh or 1.0) * 100 + 0.5)
+  if v < 20 then v = 20 end
+  if v > 300 then v = 300 end
+  local s = CFG_THRESH .. string.format("%03d", v)
+  pcall(function() threshPusher:SetText(s) end)
+end
+
+local function PushDist()
+  local db = DB()
+  if not distPusher then
+    local f = CreateFrame("Frame"); f:Hide()
+    distPusher = f:CreateFontString(nil, "BACKGROUND")
+    distPusher:SetFont("Fonts\\FRIZQT__.TTF", 10)
+    if not distPusher:GetFont() then distPusher:SetFont("Fonts\\ARIALN.TTF", 10) end
+  end
+  local v = math.floor((db.nameDistMul or 1.0) * 100 + 0.5)
+  if v < 20 then v = 20 end
+  if v > 300 then v = 300 end
+  local s = CFG_DIST .. string.format("%03d", v)
+  pcall(function() distPusher:SetText(s) end)
+end
+
 -- ---- the panel ----
 local panel
 local checks = {}   -- key -> checkbox frame
 local radioEng, radioPin
+local scaleSlider, scaleVal
+local threshSlider, threshVal
+local distSlider, distVal
 
 local function Refresh()
   local db = DB()
@@ -198,6 +255,34 @@ local function Refresh()
   if radioEng then
     if on then radioEng:Enable(); radioPin:Enable()
     else radioEng:Disable(); radioPin:Disable() end
+  end
+  if scaleSlider and scaleSlider._cnfixRefresh then
+    scaleSlider._cnfixRefresh(on)
+  end
+  if threshSlider and threshSlider._cnfixRefresh then
+    threshSlider._cnfixRefresh(on)
+  end
+  if distSlider and distSlider._cnfixRefresh then
+    distSlider._cnfixRefresh(on)
+  end
+  -- sync slider positions with DB values
+  if scaleSlider then
+    scaleSlider:SetValue(DB().nameScale or 1.0)
+  end
+  if scaleVal then
+    scaleVal:SetText(string.format("%.1fx", DB().nameScale or 1.0))
+  end
+  if threshSlider then
+    threshSlider:SetValue(DB().nameThresh or 1.0)
+  end
+  if threshVal then
+    threshVal:SetText(string.format("%.1fx", DB().nameThresh or 1.0))
+  end
+  if distSlider then
+    distSlider:SetValue(DB().nameDistMul or 1.0)
+  end
+  if distVal then
+    distVal:SetText(string.format("%.1fx", DB().nameDistMul or 1.0))
   end
 end
 
@@ -227,7 +312,7 @@ end
 local function BuildPanel()
   if panel then return panel end
   panel = CreateFrame("Frame", "CNFixPanel", UIParent)
-  panel:SetWidth(320); panel:SetHeight(372)
+  panel:SetWidth(320); panel:SetHeight(500)
   panel:SetPoint("CENTER", 0, 0)
   panel:SetBackdrop({
     bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
@@ -294,13 +379,96 @@ local function BuildPanel()
   MakeCheck(panel, "surfaceTooltips", "Tooltips", nil, 22, -236)
   MakeCheck(panel, "surfaceNameplates", "Nameplates", nil, 22, -262)
 
+  -- name scale slider
+  local scaleHdr = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  scaleHdr:SetPoint("TOPLEFT", 20, -290)
+  scaleHdr:SetText("Name Scale")
+
+  scaleSlider = CreateFrame("Slider", "CNFixScaleSlider", panel, "OptionsSliderTemplate")
+  scaleSlider:SetWidth(200)
+  scaleSlider:SetHeight(16)
+  scaleSlider:SetPoint("TOPLEFT", 24, -306)
+  scaleSlider:SetMinMaxValues(0.5, 3.0)
+  pcall(function() scaleSlider:SetValueStep(0.1) end)
+  scaleSlider:SetValue(DB().nameScale or 1.0)
+  -- label showing current value
+  scaleVal = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  scaleVal:SetPoint("LEFT", scaleSlider, "RIGHT", 8, 0)
+  scaleVal:SetText(string.format("%.1fx", DB().nameScale or 1.0))
+  scaleSlider:SetScript("OnValueChanged", function()
+    local v = scaleSlider:GetValue()
+    DB().nameScale = v
+    scaleVal:SetText(string.format("%.1fx", v))
+    PushScale()
+    -- No PulseOverheadNames needed: scale is a live memory patch,
+    -- not a text cache. Pulsing CVars here races and toggles NPC names off.
+  end)
+  -- master off -> grey out slider (vanilla Slider has no Enable/Disable;
+  -- use alpha + block input via EnableMouse instead)
+  scaleSlider._cnfixRefresh = function(on)
+    if on then scaleSlider:SetAlpha(1.0); scaleSlider:EnableMouse(true)
+    else scaleSlider:SetAlpha(0.5); scaleSlider:EnableMouse(false) end
+  end
+
+  -- distance threshold slider (how far names stay at full size)
+  local threshHdr = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  threshHdr:SetPoint("TOPLEFT", 20, -334)
+  threshHdr:SetText("Range")
+
+  threshSlider = CreateFrame("Slider", "CNFixThreshSlider", panel, "OptionsSliderTemplate")
+  threshSlider:SetWidth(200)
+  threshSlider:SetHeight(16)
+  threshSlider:SetPoint("TOPLEFT", 24, -350)
+  threshSlider:SetMinMaxValues(0.2, 3.0)
+  pcall(function() threshSlider:SetValueStep(0.1) end)
+  threshSlider:SetValue(DB().nameThresh or 1.0)
+  threshVal = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  threshVal:SetPoint("LEFT", threshSlider, "RIGHT", 8, 0)
+  threshVal:SetText(string.format("%.1fx", DB().nameThresh or 1.0))
+  threshSlider:SetScript("OnValueChanged", function()
+    local v = threshSlider:GetValue()
+    DB().nameThresh = v
+    threshVal:SetText(string.format("%.1fx", v))
+    PushThresh()
+  end)
+  threshSlider._cnfixRefresh = function(on)
+    if on then threshSlider:SetAlpha(1.0); threshSlider:EnableMouse(true)
+    else threshSlider:SetAlpha(0.5); threshSlider:EnableMouse(false) end
+  end
+
+  -- distance growth multiplier slider (how fast names grow with distance)
+  local distHdr = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+  distHdr:SetPoint("TOPLEFT", 20, -378)
+  distHdr:SetText("Dist Growth")
+
+  distSlider = CreateFrame("Slider", "CNFixDistSlider", panel, "OptionsSliderTemplate")
+  distSlider:SetWidth(200)
+  distSlider:SetHeight(16)
+  distSlider:SetPoint("TOPLEFT", 24, -394)
+  distSlider:SetMinMaxValues(0.2, 3.0)
+  pcall(function() distSlider:SetValueStep(0.1) end)
+  distSlider:SetValue(DB().nameDistMul or 1.0)
+  distVal = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+  distVal:SetPoint("LEFT", distSlider, "RIGHT", 8, 0)
+  distVal:SetText(string.format("%.1fx", DB().nameDistMul or 1.0))
+  distSlider:SetScript("OnValueChanged", function()
+    local v = distSlider:GetValue()
+    DB().nameDistMul = v
+    distVal:SetText(string.format("%.1fx", v))
+    PushDist()
+  end)
+  distSlider._cnfixRefresh = function(on)
+    if on then distSlider:SetAlpha(1.0); distSlider:EnableMouse(true)
+    else distSlider:SetAlpha(0.5); distSlider:EnableMouse(false) end
+  end
+
   -- divider 2
   local d2 = panel:CreateTexture(nil, "ARTWORK")
   d2:SetTexture(0.4, 0.4, 0.4, 0.6); d2:SetHeight(1)
-  d2:SetPoint("TOPLEFT", 18, -296); d2:SetPoint("TOPRIGHT", -18, -296)
+  d2:SetPoint("TOPLEFT", 18, -424); d2:SetPoint("TOPRIGHT", -18, -424)
 
   -- realtime (separate, with grey disclaimer)
-  local rt = MakeCheck(panel, "realtime", "Real-time Contextual names", nil, 22, -308)
+  local rt = MakeCheck(panel, "realtime", "Real-time Contextual names", nil, 22, -436)
   local disc = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
   disc:SetPoint("TOPLEFT", rt, "BOTTOMLEFT", 4, 0)
   disc:SetText("(toggle off may reduce framerate drop)")
@@ -411,4 +579,7 @@ boot:SetScript("OnEvent", function()
   DB()            -- ensures CNFixNamesDB exists + has defaults
   BuildMinimap()
   PushConfig()    -- send saved settings to the DLL
+  PushScale()     -- send name scale to the DLL
+  PushThresh()    -- send distance threshold to the DLL
+  PushDist()      -- send distance multiplier to the DLL
 end)
