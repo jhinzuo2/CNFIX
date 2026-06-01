@@ -1,0 +1,28 @@
+THIRD-PARTY NOTICES — WoWNameRomanizer
+
+This project bundles or derives from third-party data and code:
+
+1. CC-CEDICT  (Chinese-English dictionary; single-character meaning glosses)
+   License: Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0)
+   Source: https://www.mdbg.net/chinese/dictionary?page=cc-cedict
+   The compiled meaning table (meaning_map.h) is DERIVED FROM CC-CEDICT.
+   If you redistribute that data or derivatives, you must:
+     - give attribution to CC-CEDICT, and
+     - license the data/derivative under CC BY-SA 4.0 (share-alike).
+   The MIT license covers ONLY the program code, not the CC-CEDICT-derived data.
+
+2. MinHook  (hooking library)
+   License: BSD 2-Clause. Copyright (c) 2009-2017 Tsuda Kageyu.
+   Source: https://github.com/TsudaKageyu/minhook
+   Compiled into the DLL.
+
+3. pinyin data
+   Generated using pypinyin over the GB2312 character set.
+   pypinyin: MIT License.
+
+4. WoW-term phrase glossary
+   Term mappings adapted from the WoWTranslate addon's glossary list.
+
+Offsets were cross-referenced against the open-source UnitXP Service Pack 3
+(for verification only; no code copied).
+WoWTranslate glossary terms (game dungeon/zone/raid names) bundled as CNFix_glossary.txt, used with author permission.

@@ -1,0 +1,301 @@
+CNFix v2.1  -- What's new
+  - Default Blizzard nameplates now get Chinese
+    names translated, and stay translated, and
+    update to the proper contextual name quickly.
+  - Pet/companion owner names ("<Owner's Minion>") now translate everywhere they
+    appear -- nameplates, tooltips and the 3D float -- and follow Pinyin mode.
+  - Tooltip unit name-line translation is available as an opt-in (off by default,
+    so WoWTranslate handles tooltips out of the box). When on, the tooltip name
+    matches the name shown over the head and on the unit frame.
+  - Pets, summons and players seen only on a nameplate now get their names fetched
+    automatically as you target or mouse over them.
+  - The tooltip, unit frame and 3D floating name all show the same translated name
+    as each other, including for sentence-style names.
+  - Map mouseover names now use the same CamelCase style as everywhere else and
+    support Pinyin mode.
+  - Optional "*" suffix on a /whisper or mail recipient to force the original
+    Chinese target when a translated English name would otherwise be ambiguous.
+
+CNFix v2  (DLL: CNFixEnglish.dll  +  addon CNFixNames v2.3)
+  - NPC subname overhead translation. The <subname> under a creature's overhead
+    name (engine getter FUN_005e09f0) is now hooked and translated like the guild
+    tag. Independent signature gate; self-skips on mismatch.
+  - Guild overhead translation made reliable: the addon proactively harvests a
+    unit's guild via WoWTranslate's ResolveGuildDisplayName and pushes the BARE
+    guild string the overhead getter resolves, then rebuilds the plate once.
+  - Contextual English names render in CamelCase across overhead / who /
+    nameplate / social / inspect / trade / dropdown for consistency, with the PvP
+    rank/title kept SEPARATE (e.g. "Scout UncleReturns", never smushed).
+  - Pinyin mode fixed on inspect / trade / right-click dropdown: these surfaces now
+    render the DLL's romanization (no blank or leftover Chinese). PvP rank is also
+    kept separate from the pinyin name.
+  - Release audit: clean build (no error/real-bug warnings), removed one dead
+    variable in the reverse-swap path. No behavior change.
+  (DLL: CNFixEnglish.dll  +  addon CNFixNames v2.3)
+  Convergence pass: a Chinese name now reads the SAME English on every surface
+  (unit frame, floating overhead name, guild tag, /who), and a contextual name
+  known to WoWTranslate reaches CNFix in real time instead of at logout.
+
+  DLL (CNFixEnglish.dll):
+  - Unified name fallback. The SetText path (resolve(), used by unit frames /
+    social / who / UI) now falls back through the SAME glossary-free composer
+    compose_name() that the overhead/guild path (resolve_name()) already used,
+    instead of smart_compose(). So a name that isn't learned yet de-romanises to
+    the same words on the unit frame as over the head -- no more
+    "FatherSYoungerBrotherRe..." on the frame vs "Father's younger brother
+    Return" overhead -- and chat-slang glossary terms (pet/DPS/HP/LFG/Sap...) can
+    no longer hijack a name on the SetText surface either.
+  - Preserved by design: the game-term glossary still wins FIRST in resolve() for
+    real dungeons/zones/raids (no regression there), and names are still
+    collapsed to a single whitespace-free token on the SetText path so whisper /
+    /who / invite targeting and the reverse-swap keep working. The unification is
+    in the *meaning* (one composer, one answer), not in dropping identifier safety.
+  - Guild tags already resolve through resolve_name() (getter @6094c0), so they
+    ride the same unified composer automatically.
+  - Live dual-key ingest (already shipped, retained): on target / mouseover /
+    party / raid, the addon reads WoWTranslate's runtime translation for a unit
+    under BOTH its name key ("\1wt_name:"..zh) AND its raw-text key (zh), pushes
+    it straight into the DLL, then repaints once the DLL confirms the learn. The
+    contextual name ("Uncle Returns") enters CNFix the instant the tooltip knows
+    it, not at logout.
+  - Fixed the overhead refresh lever. v2.1 pulsed UnitNameRenderMode, which routes
+    to a separate handler that early-outs on a no-net-change -- so the Overhead
+    Names toggle and the English/Pinyin radio looked dead and freshly harvested
+    names didn't take. The pulse now toggles UnitNamePlayer (player/creature
+    plates) and UnitNamePlayerGuild (guild tags) to a genuinely different valid
+    value and restores them next frame; these are wired to the engine's plate
+    dirty-bit handler, so every plate recomposes through the DLL hook.
+  - The corrected pulse now fires on: the Overhead Names / master toggle, the
+    English<->Pinyin radio (v2.1 never pulsed on a pinyin flip), and whenever a
+    new contextual name is ingested (so a literal fallback is strictly temporary
+    and upgrades to the contextual name on the next frame). Guild tags converge
+    the same way.
+  - Guild/rank key fix. WoWTranslate caches guild names under
+    "\1wt_name:guild:"..name and ranks under "\1wt_name:rank:"..name. The harvest
+    previously stripped only the "\1wt_name:" prefix, so it pushed "guild:<zh>" to
+    the DLL while the overhead guild getter looks up the BARE guild string -- they
+    never matched, so guild tags stayed Chinese. The harvest now strips the
+    guild:/rank: infix too, and enables WoWTranslate guild-name translation on
+    load, so guild tags can resolve.
+  - Realtime-toggle hardening. SyncLiveCache marks a cache key "seen" before
+    pushing it; if the "Real-time Contextual names" toggle was off when a name was
+    cached, that key was marked seen and never re-pushed when the toggle came back
+    on. Turning realtime on now forces a full re-sweep of WoWTranslate's cache.
+  - New "/cnfix trace" command. Run it on a Chinese-named target to print a
+    per-link readout: whether WoWTranslate has the contextual name (and under which
+    key), whether the addon pushed it, what the DLL renders it as RIGHT NOW (the
+    ground truth for whether the learned pair is live), the realtime toggle state,
+    and the same for the unit's guild. One command localises any break.
+
+
+
+  Overhead names now ALWAYS resolve to readable English instead of staying
+  Chinese when no contextual translation exists yet:
+  - Added a glossary-free fallback composer for overhead/guild names
+    (dictionary longest-match -> single-char meaning -> pinyin). Game-term
+    slang (pet/DPS/HP/LFG...) still can never hijack a name. If a name cannot
+    be fully de-romanised it is left fully Chinese (never a half-translation).
+  - Guild tags over heads now translate too (getter @6094c0), behind their own
+    signature gate and the same "Overhead Names" toggle; tooltips pass through
+    to WoWTranslate unchanged. Translated guilds read like <Nirvana*>.
+  - The "*" marker now also applies to translated guild tags.
+
+  Addon CNFixNames:
+  - Floating names rebuild instantly when the Overhead Names toggle (or master)
+    is flipped -- pulses UnitNameRenderMode so cached 3D name plates recompose.
+  - Harvest catch-up: when WoWTranslate's cache grows, floating names rebuild
+    once so freshly-known contextual names replace earlier literal ones.
+  - (Harvest-and-own: the DLL already copies WoWTranslate's entire cache into
+    CNFix_learned.txt continuously, so names survive even if WT is removed.)
+
+CNFix v2.0  (DLL: CNFixEnglish.dll  +  addon CNFixNames)
+  DLL - floating overhead / 3D name translation:
+  - Hooks the in-world name formatter (the overhead/GetName path the global
+    SetText hook never sees), so names floating over players' and creatures'
+    heads now translate. Installed behind its OWN signature check: if it does
+    not match the client it is skipped silently and core translation is
+    completely unaffected.
+  - Name-only resolver for overhead names: uses learned + dictionary only,
+    never the game-term glossary or word-by-word compose, so chat-slang
+    glossary entries (pet/DPS/HP/LFG...) can no longer hijack a player name
+    and the word-sub/validation error never applies to overhead names.
+  - Translated overhead names get a trailing "*" marker (e.g. "TopGentleman*").
+    Only on names CNFix actually translated; never on Chinese, never when the
+    toggle is off, never on blocked/identity callers; no double markers.
+  - New config flag (7th) "overhead": in-game toggle "Overhead Names" under
+    Surfaces, default ON, same saved-variable / config-push pattern as the
+    other surface toggles. Off = original Chinese, exact.
+  - Learn no longer drops a contextual name just because it collides with a
+    glossary term: the contextual translation is now always persisted to
+    CNFix_learned.txt (glossary still wins for on-screen game-term display).
+  - Existing SetText hook, all action hooks, the kSig client-safety gate and
+    threading model are unchanged.
+
+  Addon CNFixNames:
+  - "Overhead Names" checkbox added under Surfaces; pushes the 7th config flag.
+  - Panel resized to fit the new option.
+
+CNFixNames addon (DLL unchanged: CNFixEnglish.dll stays v1.3.2)
+  - New UI-surface coverage, added as a separate file (CNFixExtend.lua) with
+    NO change to the DLL and no change to existing addon behaviour:
+      * WorldMap mouseover dot names (isolated block, WorldMapTooltip-only):
+        hooks AddLine + tooltip SetText + line FontStrings (re-walked after
+        AddLine, since lines are created lazily) + an OnShow scan fallback;
+        \2 passthrough, request-if-unknown, applies on next show. No scanner
+      * Inspect frame player name.
+      * Trade frame recipient name.
+      * Right-click drop-down title / CJK items (+ optional width fit).
+  - Single naming authority: each surface uses the raw WoWTranslate value via
+    the DLL's \2 passthrough -- identical to what PushPair already feeds the
+    DLL for unit frames -- so all surfaces agree. No canonicalize/beautify,
+    guidCache, ttCache, transformLine, lineCache or tooltip-rewrite systems.
+  - Live Google-name upgrade (broadened): when a contextual (Google) name
+    reaches the DLL, every visible surface whose TRUE SOURCE is that Chinese
+    name is repainted to the Google name instead of the offline word-sub.
+    Coverage: named Blizzard unit frames (target/player/mouseover/party/raid)
+    PLUS a bounded source-recovery walk over WorldFrame (nameplates) and
+    UIParent (pfUI / custom unit frames, social & group rows); the who list
+    also gets a safe WhoList_Update. The repaint always re-sets the RAW Chinese
+    source (never the fallback English), so the DLL re-resolves it to the
+    learned Google hit. For a frame that only exposes fallback text, the source
+    is recovered via fb2zh, a fallback->Chinese map harvested from unit frames
+    (works even when a Blizzard frame is hidden under pfUI -- its GetText still
+    returns the fallback string the visible pfUI frame is stuck on). Leading
+    color codes are preserved. Per-upgrade diagnostics print when debug is on
+    (/cnfix debug): zh, en, each frame checked, before/after, matched?, SetText
+    called?, walk-reset and fb2zh counts. (No DLL change; CNFixNames.PushPair
+    calls CNFix_OnUpgrade. We still never call the window-opening
+    FriendsList_Update / GuildRoster_Update -- those rows go through the walk.)
+  - Unit-frame contextual-name harvest: fixes frames stuck on the DLL word-sub
+    while the tooltip already showed the contextual (Google) name. Root cause:
+    WoWTranslate caches the displayed name under its NAME key and the base
+    RequestName early-returns when that key is cached WITHOUT pushing it, so the
+    DLL never learned the contextual value for that exact UnitName. CNFixExtend
+    now bridges it directly: on target / mouseover / party / raid it takes
+    UnitName(unit) as the authoritative Chinese source, reads WoWTranslate's
+    value under BOTH the name key and the raw-text key, PushPairs it under that
+    EXACT key, and forces a repaint (so e.g. a target on "DespotWarGeneral"
+    becomes "OverlordWarrior"). Each name is harvested once -- after the DLL
+    learns it, every later draw resolves contextually on its own. Names not yet
+    translated are requested and re-checked ~0.8s/1.8s later (async arrival).
+    Does not modify RequestName / SyncLiveCache. The repaint is now GATED on a
+    learned-confirmation probe: after PushPair we render zh on a hidden probe
+    FontString (unique color each try so the DLL result-cache can't mask it)
+    and only repaint once the DLL actually resolves zh -> tokenize(en) -- so a
+    repaint can never race the smart_compose fallback (the cause of a target
+    showing the word-sub while the tooltip showed the contextual name). If the
+    DLL never converges (a glossary/validation reject) we log it and repaint
+    anyway. /cnfix debug logs unit, UnitName, the WT value + which key, and per
+    attempt: want, dllOut, dllLearnedHit. Also fixes a latent bug in the after()
+    timer where a callback scheduling another after() was dropped (broke any
+    self-rescheduling retry chain).
+  - /who reverse search (English -> Chinese, Blizzard-style partial match):
+    the server only knows the original Chinese name and the DLL does not hook
+    SendWho, so /who typed in English never reached the server. CNFixExtend now
+    wraps SendWho in Lua and mirrors vanilla /who's PARTIAL ordered-substring
+    behavior -- any contiguous run of the normalized English name resolves
+    ("thew", "winds", "windsme", "the winds", "meet" all find "Thewindsmeet").
+    Pipeline: normalize the query (lowercase, strip space + punctuation) -> scan
+    every learned English name (CNFix_LearnedPairs, the zh->en pairs pushed this
+    session, plus the WoWTranslate name cache for anything not yet pushed) ->
+    keep those whose normalized English contains the normalized query -> pick
+    the best (exact > prefix > shortest) -> SendWho(thatChineseName). English is
+    never sent to the server; guild:/rank: keys are skipped; Chinese, wildcard,
+    level and structured (quoted) /who pass through unchanged. /cnfix debug
+    prints typed / normalized / candidate matches / chosen Chinese / payload.
+  - Only other change: CNFixNames.lua exposes existing helpers as globals
+    (CNFix_HasForeign / CNFix_PushPair / CNFix_RequestName) for the new file.
+
+CNFix v1.3.2
+  - Stability fix: eliminated a thread-safety bug. A background thread that learns
+    names from WoWTranslate was modifying shared lookup tables while the main
+    thread read them, which could cause a rare crash - most likely to surface
+    alongside other injected DLLs that increase UI activity during combat (e.g.
+    nampower). Learning is now queued and applied on the main thread only, so the
+    tables are never accessed from two threads at once.
+
+CNFix v1.3.1
+  - Crash fix: malformed/!truncated UTF-8 names (e.g. a name clipped mid-character
+    in a server message) could crash the client and, once learned, crash on every
+    launch. Added strict UTF-8 validation before translating, learning, and
+    persisting. The learned file now self-heals: any bad entries are skipped and
+    the file is rewritten clean on load, so an already-corrupted CNFix_learned.txt
+    recovers automatically (no manual delete needed).
+
+CNFix - Changelog
+=================
+
+V1.3
+----
+NEW FEATURES
+  - Config panel: open with /cnfix show or the minimap button. Simple checkboxes,
+    all on by default:
+      * CNFix (master, green) - turns all translation on/off
+      * Social - who list, friends, guild
+      * UnitFrames - target / party / player (default frames)
+      * Group Finder - dungeon list + titles
+      * Real-time Contextual names - live WoWTranslate learning on/off
+        (turning it off may reduce framerate drops)
+    Turning the master off greys out the others (their states are remembered).
+  - Name style: English or Pinyin, switchable in the panel. The old separate
+    CNFixPinyin.dll is retired - pinyin is now a mode inside CNFixEnglish.dll, so
+    pinyin users get every fix the English build has (mail / whisper / invite /
+    trade all swap back to the real Chinese name automatically).
+  - Settings are saved per account (CNFixNamesDB) and applied on login.
+
+NOTES
+  - Pinyin mode romanizes every character to its sound, so dungeon/zone names
+    also become pinyin in that mode (English mode keeps the contextual meanings
+    and the WoWTranslate glossary).
+  - The UnitFrames toggle covers the default frames. Custom unit-frame addons
+    (e.g. pfUI) are still translated; they aren't governed by this toggle.
+
+UPGRADING
+  - Remove CNFixPinyin.dll from dlls.txt (it no longer exists). Use only
+    CNFixEnglish.dll and pick English/Pinyin in the panel.
+
+V1.2
+----
+NEW FEATURES
+  - Contextual name translation: names now read as real English meanings
+    (e.g. "Supernova", "WailingCaverns", "DragonAscendant") instead of rough
+    pinyin, using a bundled 100k+ entry offline dictionary.
+  - WoWTranslate glossary built in: dungeon, zone, raid and chat terms (956
+    entries) always take priority over generic translation, so game terms are
+    correct everywhere.
+  - Smart live learning (optional, via WoWTranslate): as you encounter Chinese
+    names, the CNFixNames addon reads WoWTranslate's Google translations from
+    memory and feeds them to CNFix in real time - so a name upgrades to
+    Google-quality on screen within a second or two, then is remembered
+    permanently and offline (saved to CNFix_learned.txt). The DLL itself makes
+    no network calls; WoWTranslate is the translation source. Bundled game
+    terms (glossary) are protected and never overridden by a learned name.
+  - Group Finder support: dungeon names and group titles translate; chat
+    shorthand and digit codes (e.g. 4=1, T N M D) are left untouched.
+  - Full mail support: read and send mail to translated names, including long
+    names (recipient field widened so the English name fits; the real Chinese
+    name is sent to the server).
+  - Preserved colours & status: offline/online colouring and " - Offline"
+    labels stay intact.
+  - Single combined dictionary: all data merged into one CNFix_data.txt for a
+    clean, plug-and-play install.
+
+WHAT YOU NEED TO INSTALL
+  1. CNFixEnglish.dll          - next to WoW.exe; add to dlls.txt
+  2. CNFix_data.txt    (NEW)   - next to WoW.exe (the combined dictionary)
+  3. CNFix_learned.txt (opt.)  - next to WoW.exe; grows over time
+  4. CNFixNames folder (opt.)  - into Interface\AddOns\ ; only needed for live
+                                 WoWTranslate name upgrades
+
+UPGRADING FROM AN EARLIER VERSION
+  - Remove any older CNFix / romanizer DLL from dlls.txt. Run only
+    CNFixEnglish.dll.
+  - The old separate dictionary files (CNFix_cedict.txt, CNFix_chars.txt,
+    CNFix_glossary.txt) are replaced by the single CNFix_data.txt and can be
+    deleted.
+
+KNOWN LIMITS
+  - The Group Finder description box (large detail panel) stays in Chinese: that
+    text is drawn by the client itself and cannot be safely translated.
+  - Purely phonetic name characters have no meaning to translate and remain
+    transliterated; these upgrade via WoWTranslate when seen.

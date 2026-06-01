@@ -1,0 +1,10 @@
+## Interface: 11200
+## Title: CNFixNames
+## Notes: English names across who, party/raid, LFG, unit frames, mail, world-map mouseover, inspect and trade frames, right-click menus, and floating overhead names. Tooltips left alone.
+## Author: CNFix
+## Version: 2.7.4
+## SavedVariables: CNFixNamesDB
+CNFixNames.lua
+CNFixConfig.lua
+CNFixSurface.lua
+CNFixExtend.lua

@@ -1,0 +1,45 @@
+CNFix — DISCLAIMER (read before installing)
+
+WHAT THIS IS
+  A third-party DLL that injects into the World of Warcraft 1.12 (build 5875)
+  client used by some private/custom servers, to display Chinese player and
+  guild NAMES as English in the interface. It hooks client functions in memory.
+  It changes displayed names/labels, not the chat messages players type.
+
+USE AT YOUR OWN RISK
+  - Provided "as is", with no warranty of any kind. The authors are not liable
+    for any damage, data loss, account action, or other consequence.
+  - It modifies a running game client. Although it validates the client build
+    before doing anything (and disables itself if the build doesn't match), no
+    memory-modifying tool can be guaranteed 100% safe on every setup.
+  - ALWAYS test on an alt / throwaway character before using on your main.
+
+SAFETY DESIGN (what we did to reduce risk)
+  - On load it verifies the client build string and a byte-signature at every
+    address it intends to hook. If ANY check fails (e.g. after a client patch
+    that moves code), it installs NOTHING and silently does nothing — it will
+    not hook a client it doesn't recognize. Result: translation simply stops
+    working until updated, rather than crashing your game.
+  - Pointer reads are guarded; a vectored exception handler logs faults that
+    originate in this DLL (debug builds) for diagnosis.
+  - It changes only what is DISPLAYED. Your real character names, the server,
+    and your account data are unchanged. Outgoing actions (invite/whisper/etc)
+    are translated back to the original name before they reach the server.
+
+PRIVACY
+  - No network access. No data leaves your machine. No telemetry.
+  - Logging is OFF by default. It only writes a log if you create a file named
+    "WoWRomanizer.debug" next to the DLL, and then only to that same folder
+    (never to system locations).
+
+SERVER RULES
+  - This is built for servers that permit client DLLs/mods. You are responsible
+    for following your server's current rules. Do not use on servers that
+    prohibit client modification.
+
+NOT AFFILIATED
+  - Not affiliated with or endorsed by Blizzard Entertainment.
+  - World of Warcraft is a trademark of Blizzard Entertainment.
+
+By installing it, you accept these terms and the MIT license / third-party
+notices included with this release.
