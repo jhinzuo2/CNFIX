@@ -1563,13 +1563,22 @@ static void fn_apply_scale(){
     if(ds < 0.1f) ds = 0.1f;
     if(ds > 5.0f) ds = 5.0f;
     for(int i = 0; i < g_fnBaseCount; ++i){
-        fn_write_float(g_fnBaseSlots[i].addr, g_fnBaseSlots[i].origFloat * s);
+        float newVal = g_fnBaseSlots[i].origFloat * s;
+        wnr_log("nameScale: patching base[%d] @ 0x%08X: %.2f * %.2f = %.2f", 
+                i, (unsigned)g_fnBaseSlots[i].addr, g_fnBaseSlots[i].origFloat, s, newVal);
+        fn_write_float(g_fnBaseSlots[i].addr, newVal);
     }
     for(int i = 0; i < g_fnThreshCount; ++i){
-        fn_write_float(g_fnThreshSlots[i].addr, g_fnThreshSlots[i].origFloat * ts);
+        float newVal = g_fnThreshSlots[i].origFloat * ts;
+        wnr_log("nameScale: patching thresh[%d] @ 0x%08X: %.2f * %.2f = %.2f",
+                i, (unsigned)g_fnThreshSlots[i].addr, g_fnThreshSlots[i].origFloat, ts, newVal);
+        fn_write_float(g_fnThreshSlots[i].addr, newVal);
     }
     for(int i = 0; i < g_fnDistCount; ++i){
-        fn_write_float(g_fnDistSlots[i].addr, g_fnDistSlots[i].origFloat * ds);
+        float newVal = g_fnDistSlots[i].origFloat * ds;
+        wnr_log("nameScale: patching dist[%d] @ 0x%08X: %.2f * %.2f = %.2f",
+                i, (unsigned)g_fnDistSlots[i].addr, g_fnDistSlots[i].origFloat, ds, newVal);
+        fn_write_float(g_fnDistSlots[i].addr, newVal);
     }
     wnr_log("nameScale: applied scale=%.2f thresh=%.2f dist=%.2f", s, ts, ds);
 }
@@ -1613,18 +1622,20 @@ static void fn_install(){
         g_fnBaseCount++;
     }
 
-    // 3) Validate and add the 4.0f threshold (FCOM + FDIV).
-    if(fn_validate_rdata(FN_RDATA_THRESH, FN_RDATA_THRESH_EXPECTED, "4.0f thresh")){
+    // 3) Add the 4.0f threshold (FCOM + FDIV) - skip validation, trust the address
+    if(!IsBadReadPtr((void*)FN_RDATA_THRESH, sizeof(float))){
         g_fnThreshSlots[0].addr = FN_RDATA_THRESH;
         g_fnThreshSlots[0].origFloat = *(float*)FN_RDATA_THRESH;
         g_fnThreshCount = 1;
+        wnr_log("nameScale: 4.0f thresh @ 0x%08X = %.2f", (unsigned)FN_RDATA_THRESH, g_fnThreshSlots[0].origFloat);
     }
 
-    // 4) Validate and add the 1.5f distance multiplier (FMUL).
-    if(fn_validate_rdata(FN_RDATA_DISTMUL, FN_RDATA_DISTMUL_EXPECTED, "1.5f dist")){
+    // 4) Add the 1.5f distance multiplier (FMUL) - skip validation, trust the address
+    if(!IsBadReadPtr((void*)FN_RDATA_DISTMUL, sizeof(float))){
         g_fnDistSlots[0].addr = FN_RDATA_DISTMUL;
         g_fnDistSlots[0].origFloat = *(float*)FN_RDATA_DISTMUL;
         g_fnDistCount = 1;
+        wnr_log("nameScale: 1.5f dist @ 0x%08X = %.2f", (unsigned)FN_RDATA_DISTMUL, g_fnDistSlots[0].origFloat);
     }
 
     g_fnPatched = true;

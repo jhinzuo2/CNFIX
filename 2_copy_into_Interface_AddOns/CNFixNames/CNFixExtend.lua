@@ -803,6 +803,12 @@ throttledOverheadPulse = function()
     end)
 end
 
+-- (v2.7.4) Throttled name refresh for slider adjustments.
+-- Called when nameScale/nameThresh/nameDistMul sliders change.
+-- Uses the same throttle as contextual pulses to avoid CVAR race conditions.
+CNFix_ThrottledRefreshNames = throttledOverheadPulse
+
+
 -- Called from CNFixNames.lua PushPair whenever a Google name reaches the DLL.
 -- Debounced: a burst of pushes collapses into a single repaint pass.
 function CNFix_OnUpgrade(zh, en)

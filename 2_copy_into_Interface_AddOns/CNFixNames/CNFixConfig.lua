@@ -400,8 +400,10 @@ local function BuildPanel()
     DB().nameScale = v
     scaleVal:SetText(string.format("%.1fx", v))
     PushScale()
-    -- No PulseOverheadNames needed: scale is a live memory patch,
-    -- not a text cache. Pulsing CVars here races and toggles NPC names off.
+    -- Refresh names to apply new scale immediately
+    if CNFix_ThrottledRefreshNames then
+      CNFix_ThrottledRefreshNames()
+    end
   end)
   -- master off -> grey out slider (vanilla Slider has no Enable/Disable;
   -- use alpha + block input via EnableMouse instead)
@@ -430,6 +432,10 @@ local function BuildPanel()
     DB().nameThresh = v
     threshVal:SetText(string.format("%.1fx", v))
     PushThresh()
+    -- Refresh names to apply new threshold immediately
+    if CNFix_ThrottledRefreshNames then
+      CNFix_ThrottledRefreshNames()
+    end
   end)
   threshSlider._cnfixRefresh = function(on)
     if on then threshSlider:SetAlpha(1.0); threshSlider:EnableMouse(true)
@@ -456,6 +462,10 @@ local function BuildPanel()
     DB().nameDistMul = v
     distVal:SetText(string.format("%.1fx", v))
     PushDist()
+    -- Refresh names to apply new distance multiplier immediately
+    if CNFix_ThrottledRefreshNames then
+      CNFix_ThrottledRefreshNames()
+    end
   end)
   distSlider._cnfixRefresh = function(on)
     if on then distSlider:SetAlpha(1.0); distSlider:EnableMouse(true)
