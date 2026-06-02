@@ -201,10 +201,14 @@ local function PushThresh()
     threshPusher:SetFont("Fonts\\FRIZQT__.TTF", 10)
     if not threshPusher:GetFont() then threshPusher:SetFont("Fonts\\ARIALN.TTF", 10) end
   end
-  local v = math.floor((db.nameThresh or 1.0) * 100 + 0.5)
+  -- Invert the value: UI shows 0.2-3.0 (low=close, far=range)
+  -- DLL receives inverted: 3.0->0.33, 1.0->1.0, 0.2->5.0
+  -- This makes higher UI values = names stay big at further distance
+  local inverted = 1.0 / (db.nameThresh or 1.0)
+  local v = math.floor(inverted * 100 + 0.5)
   if v < 20 then v = 20 end
-  if v > 300 then v = 300 end
-  local s = CFG_THRESH .. string.format("%03d", v)
+  if v > 500 then v = 500 end
+  local s = CFG_THRESH .. string.format("%03d", math.min(v, 300))
   pcall(function() threshPusher:SetText(s) end)
 end
 
@@ -415,7 +419,7 @@ local function BuildPanel()
   -- distance threshold slider (how far names stay at full size)
   local threshHdr = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   threshHdr:SetPoint("TOPLEFT", 20, -334)
-  threshHdr:SetText("Range")
+  threshHdr:SetText("Keep Size At Range")
 
   threshSlider = CreateFrame("Slider", "CNFixThreshSlider", panel, "OptionsSliderTemplate")
   threshSlider:SetWidth(200)
@@ -445,13 +449,13 @@ local function BuildPanel()
   -- distance growth multiplier slider (how fast names grow with distance)
   local distHdr = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
   distHdr:SetPoint("TOPLEFT", 20, -378)
-  distHdr:SetText("Dist Growth")
+  distHdr:SetText("Distance Size")
 
   distSlider = CreateFrame("Slider", "CNFixDistSlider", panel, "OptionsSliderTemplate")
   distSlider:SetWidth(200)
   distSlider:SetHeight(16)
   distSlider:SetPoint("TOPLEFT", 24, -394)
-  distSlider:SetMinMaxValues(0.2, 3.0)
+  distSlider:SetMinMaxValues(0.5, 5.0)
   pcall(function() distSlider:SetValueStep(0.1) end)
   distSlider:SetValue(DB().nameDistMul or 1.0)
   distVal = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
