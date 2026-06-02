@@ -201,14 +201,13 @@ local function PushThresh()
     threshPusher:SetFont("Fonts\\FRIZQT__.TTF", 10)
     if not threshPusher:GetFont() then threshPusher:SetFont("Fonts\\ARIALN.TTF", 10) end
   end
-  -- Invert the value: UI shows 0.2-3.0 (low=close, far=range)
-  -- DLL receives inverted: 3.0->0.33, 1.0->1.0, 0.2->5.0
-  -- This makes higher UI values = names stay big at further distance
-  local inverted = 1.0 / (db.nameThresh or 1.0)
-  local v = math.floor(inverted * 100 + 0.5)
+  -- UI slider: 0.2 (close) to 3.0 (far)
+  -- Send directly to DLL: 0.20 to 3.00 (no inversion)
+  -- Lower value = names shrink sooner, Higher value = names stay big further
+  local v = math.floor((db.nameThresh or 1.0) * 100 + 0.5)
   if v < 20 then v = 20 end
-  if v > 500 then v = 500 end
-  local s = CFG_THRESH .. string.format("%03d", math.min(v, 300))
+  if v > 300 then v = 300 end
+  local s = CFG_THRESH .. string.format("%03d", v)
   pcall(function() threshPusher:SetText(s) end)
 end
 
