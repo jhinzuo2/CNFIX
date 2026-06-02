@@ -1569,8 +1569,13 @@ static void fn_apply_scale(){
         fn_write_float(g_fnBaseSlots[i].addr, newVal);
     }
     for(int i = 0; i < g_fnThreshCount; ++i){
-        float newVal = g_fnThreshSlots[i].origFloat * ts;
-        wnr_log("nameScale: patching thresh[%d] @ 0x%08X: %.2f * %.2f = %.2f",
+        // Invert threshold: UI value 0.2-3.0
+        // 0.2 = names shrink immediately (thresh becomes 20.0)
+        // 1.0 = default behavior (thresh stays 4.0)
+        // 3.0 = names stay big very far (thresh becomes 1.33)
+        float invertedThresh = g_fnThreshSlots[i].origFloat / ts;
+        float newVal = invertedThresh;
+        wnr_log("nameScale: patching thresh[%d] @ 0x%08X: %.2f / %.2f = %.2f",
                 i, (unsigned)g_fnThreshSlots[i].addr, g_fnThreshSlots[i].origFloat, ts, newVal);
         fn_write_float(g_fnThreshSlots[i].addr, newVal);
     }
