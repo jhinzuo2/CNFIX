@@ -327,7 +327,9 @@ static bool try_push(const char* t){
         return true;
     }
     // Floating name scale: \1CNFXSCALE\1 followed by 3 digits (050..300 = 0.50x..3.00x).
-    // Patches the 0.2f base scale constant inside FUN_006c6e90 at runtime.
+    // Patches the 0.2f immediate(s) inside FUN_006c6e90 AND redirects the pooled
+    // 0.2f FMUL operands (0x0080679c) to a DLL-owned float. This avoids writing to
+    // pooled global constants (which can break unrelated UI systems).
     size_t sclen=strlen(CFGSCALE);
     if(strncmp(t,CFGSCALE,sclen)==0){
         const char* d=t+sclen;
@@ -527,6 +529,74 @@ static std::unordered_map<std::string,std::string> g_pyReverse; // pinyin token 
 // is learned (invalidate_cache), so a freshly-learned name still upgrades promptly.
 static std::unordered_map<std::string,std::string> g_nameCacheEn; // overhead resolve, English mode
 static std::unordered_map<std::string,std::string> g_nameCachePy; // overhead resolve, pinyin mode
+
+// ================= OVERHEAD NAME DISTANCE DIAGNOSTICS =================
+// We need a stable distance/depth metric to drive a non-linear overhead name
+// scaling curve (5y/20y/50y breakpoints) and to normalize out model-size so
+// mounts don't blow up names.
+//
+// We hook the final world-text draw call (0x00672490) and log RAW stack args.
+// This avoids any calling-convention / float-ABI mismatch issues.
+//
+// Logging is already gated by the WoWRomanizer.debug flag file (wnr_common.h).
+typedef void (__fastcall* oh_draw_raw_t)(void* self, void* edx);
+// Must be a global (non-static) symbol because the naked ASM detour jumps
+// through it by name.
+extern "C" void* g_oh_draw_raw = nullptr;
+
+static inline float u32_as_f(uint32_t u){ return *(float*)&u; }
+
+extern "C" void oh_draw_diag(void* self, uint32_t* sp){
+    // sp points to the ORIGINAL stack at function entry:
+    //   sp[0] = return address
+    //   sp[1].. = call arguments (pushed right-to-left)
+    static DWORD last = 0;
+    DWORD now = GetTickCount();
+    if(now - last < 250) return; // throttle hard; this call is hot
+    last = now;
+
+    uint32_t ra = sp ? sp[0] : 0;
+    uint32_t a1 = sp ? sp[1] : 0;
+    uint32_t a2 = sp ? sp[2] : 0;
+    uint32_t a3 = sp ? sp[3] : 0;
+    uint32_t a4 = sp ? sp[4] : 0;
+    uint32_t a5 = sp ? sp[5] : 0;
+    uint32_t a6 = sp ? sp[6] : 0;
+    uint32_t a7 = sp ? sp[7] : 0;
+
+    float mem[12] = {0};
+    if(self && !IsBadReadPtr(self, sizeof(mem))){
+        memcpy(mem, self, sizeof(mem));
+    }
+
+    wnr_log("ohDraw: self=%p ra=0x%08X | args: a1=0x%08X(%.4f) a2=0x%08X(%.4f) a3=0x%08X(%.4f) a4=0x%08X(%.4f) a5=0x%08X(%.4f) a6=0x%08X(%.4f) a7=0x%08X(%.4f) | mem0..11=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]",
+            self, (unsigned)ra,
+            (unsigned)a1, u32_as_f(a1),
+            (unsigned)a2, u32_as_f(a2),
+            (unsigned)a3, u32_as_f(a3),
+            (unsigned)a4, u32_as_f(a4),
+            (unsigned)a5, u32_as_f(a5),
+            (unsigned)a6, u32_as_f(a6),
+            (unsigned)a7, u32_as_f(a7),
+            mem[0],mem[1],mem[2],mem[3],mem[4],mem[5],mem[6],mem[7],mem[8],mem[9],mem[10],mem[11]);
+}
+
+// Naked detour so we can safely capture the original ESP before the compiler
+// touches it. MinHook will route calls here.
+__attribute__((naked)) static void __fastcall hk_oh_draw(void* self, void* edx){
+    __asm__(
+        "movl %esp, %eax\n"          // eax = original esp (retaddr + args)
+        "pushfl\n"
+        "pushal\n"
+        "pushl %eax\n"              // arg2: sp
+        "pushl %ecx\n"              // arg1: self (ecx)
+        "call _oh_draw_diag\n"
+        "addl $8, %esp\n"
+        "popal\n"
+        "popfl\n"
+        "jmp *_g_oh_draw_raw\n"
+    );
+}
 static std::string romanize_pinyin(const std::string& zh){
     std::string out; size_t i=0,n=zh.size();
     while(i<n){
@@ -1491,7 +1561,7 @@ struct FnPatchSlot {
 };
 static const int FN_MAX_SLOTS = 4;
 
-// 0.2f instances (both the immediate in code and the .rdata copy)
+// 0.2f instances (immediates embedded in FUN_006c6e90's code)
 static FnPatchSlot g_fnBaseSlots[FN_MAX_SLOTS];
 static int         g_fnBaseCount = 0;
 
@@ -1502,6 +1572,42 @@ static int         g_fnThreshCount = 0;
 // 1.5f distance multiplier (.rdata)
 static FnPatchSlot g_fnDistSlots[1];
 static int         g_fnDistCount = 0;
+
+// We must NOT patch pooled globals like 0x0080679c directly. Instead, redirect
+// the two FMUL instructions that reference it to a DLL-owned float.
+//   - FUN_006c6e90 @ 0x006c6f36 : nameplate/float renderer far-range FMUL
+//   - FUN_005fa760 @ 0x005fa91a : overhead-name projection scaler FMUL
+static const uintptr_t FN_FMUL_INSTR_ADDR = 0x006c6f36; // D8 0D 9C 67 80 00
+static const uintptr_t OH_FMUL_INSTR_ADDR = 0x005fa91a; // D8 0D 9C 67 80 00
+
+// Optional: loosen/tune the hardcoded clamp path in FUN_005fa760. When the
+// computed scale drops below a floor, the engine overwrites local_8 with two
+// immediates at these sites:
+//   005fa93f  MOV [EBP+local_8], 0x3eaaaaab  ; 0.33333334f
+//   005fa958  MOV [EBP+local_8], 0x3fd55555  ; 1.6666666f
+// We patch only the immediate(s), NOT any pooled globals.
+static const uintptr_t OH_CLAMP_MIN_INSTR_ADDR = 0x005fa93f;
+static const float     OH_CLAMP_MIN_EXPECTED   = 0.33333334f;
+static const uintptr_t OH_CLAMP_MAX_INSTR_ADDR = 0x005fa958;
+static const float     OH_CLAMP_MAX_EXPECTED   = 1.6666666f;
+
+static float g_dynBaseScale = FN_RDATA_BASE_EXPECTED; // updated by fn_apply_scale()
+
+struct FmulPtrPatch {
+    uintptr_t instrAddr = 0;   // address of the 6-byte D8 0D <addr32> instruction
+    uint32_t  origPtr   = 0;   // original addr32 operand
+    bool      armed     = false;
+};
+static FmulPtrPatch g_fnFmulBasePatch; // FUN_006c6e90
+static FmulPtrPatch g_ohFmulBasePatch; // FUN_005fa760
+
+struct MovImm32Patch {
+    uintptr_t instrAddr = 0;  // start of C7 45 ?? <imm32>
+    uint32_t  origImm   = 0;  // original imm32 (bit pattern)
+    bool      armed     = false;
+};
+static MovImm32Patch g_ohClampMinPatch;
+static MovImm32Patch g_ohClampMaxPatch;
 
 static bool g_fnPatched = false;
 
@@ -1546,6 +1652,84 @@ static bool fn_write_float(uintptr_t addr, float val){
     return true;
 }
 
+static bool fn_write_u32_exec(uintptr_t addr, uint32_t val){
+    if(IsBadReadPtr((void*)addr, sizeof(uint32_t))) return false;
+    DWORD oldProtect;
+    if(!VirtualProtect((void*)addr, sizeof(uint32_t), PAGE_EXECUTE_READWRITE, &oldProtect))
+        return false;
+    *(uint32_t*)addr = val;
+    VirtualProtect((void*)addr, sizeof(uint32_t), oldProtect, &oldProtect);
+    FlushInstructionCache(GetCurrentProcess(), (void*)addr, sizeof(uint32_t));
+    return true;
+}
+
+// Redirect a D8 0D <addr32> FMUL operand away from pooled constants.
+static bool fn_patch_fmul_ptr(uintptr_t instrAddr, uintptr_t expectedPtr,
+                              const char* label, FmulPtrPatch* slot){
+    if(IsBadReadPtr((void*)instrAddr, 6)){
+        wnr_log("nameScale: %s fmul@0x%08X unreadable -> skipped", label, (unsigned)instrAddr);
+        return false;
+    }
+    const unsigned char* p = (const unsigned char*)instrAddr;
+    if(p[0] != 0xD8 || p[1] != 0x0D){
+        wnr_log("nameScale: %s fmul@0x%08X opcode mismatch (got %02X %02X) -> skipped",
+                label, (unsigned)instrAddr, (unsigned)p[0], (unsigned)p[1]);
+        return false;
+    }
+    uint32_t cur = *(uint32_t*)(instrAddr + 2);
+    if(cur != (uint32_t)expectedPtr){
+        wnr_log("nameScale: %s fmul@0x%08X operand mismatch (got 0x%08X expected 0x%08X) -> skipped",
+                label, (unsigned)instrAddr, (unsigned)cur, (unsigned)expectedPtr);
+        return false;
+    }
+    slot->instrAddr = instrAddr;
+    slot->origPtr   = cur;
+    slot->armed     = fn_write_u32_exec(instrAddr + 2, (uint32_t)(uintptr_t)&g_dynBaseScale);
+    if(slot->armed){
+        wnr_log("nameScale: %s fmul@0x%08X redirected to &g_dynBaseScale=0x%08X",
+                label, (unsigned)instrAddr, (unsigned)(uintptr_t)&g_dynBaseScale);
+    }
+    return slot->armed;
+}
+
+static void fn_restore_fmul_ptr(FmulPtrPatch* slot){
+    if(!slot || !slot->armed) return;
+    fn_write_u32_exec(slot->instrAddr + 2, slot->origPtr);
+    slot->armed = false;
+}
+
+static bool fn_patch_mov_imm32(uintptr_t instrAddr, float expected, const char* label, MovImm32Patch* slot){
+    if(IsBadReadPtr((void*)instrAddr, 7)){
+        wnr_log("nameScale: %s mov@0x%08X unreadable -> skipped", label, (unsigned)instrAddr);
+        return false;
+    }
+    const unsigned char* p = (const unsigned char*)instrAddr;
+    // Typical encoding: C7 45 <disp8> <imm32>
+    if(p[0] != 0xC7 || p[1] != 0x45){
+        wnr_log("nameScale: %s mov@0x%08X opcode mismatch (got %02X %02X) -> skipped",
+                label, (unsigned)instrAddr, (unsigned)p[0], (unsigned)p[1]);
+        return false;
+    }
+    uint32_t curImm = *(uint32_t*)(instrAddr + 3);
+    float curF = *(float*)&curImm;
+    if(fabs(curF - expected) > 0.01f){
+        wnr_log("nameScale: %s mov@0x%08X imm mismatch (got %.3f expected %.3f) -> skipped",
+                label, (unsigned)instrAddr, curF, expected);
+        return false;
+    }
+    slot->instrAddr = instrAddr;
+    slot->origImm   = curImm;
+    slot->armed     = true;
+    wnr_log("nameScale: %s mov@0x%08X armed (orig=%.3f)", label, (unsigned)instrAddr, curF);
+    return true;
+}
+
+static void fn_restore_mov_imm32(MovImm32Patch* slot){
+    if(!slot || !slot->armed) return;
+    fn_write_u32_exec(slot->instrAddr + 3, slot->origImm);
+    slot->armed = false;
+}
+
 // Apply the current scale to all discovered constant slots.
 // Three independent multipliers:
 //   nameScale   → 0.2f: controls overall name SIZE
@@ -1562,6 +1746,12 @@ static void fn_apply_scale(){
     float ds = g_cfg.nameDistMul;
     if(ds < 0.1f) ds = 0.1f;
     if(ds > 5.0f) ds = 5.0f;
+
+    // Shared base scale used by BOTH pipelines (FUN_006c6e90 and FUN_005fa760).
+    // This is the replacement for pooled DAT_0080679c; it is read by the two
+    // redirected FMUL instructions.
+    g_dynBaseScale = FN_RDATA_BASE_EXPECTED * s;
+
     for(int i = 0; i < g_fnBaseCount; ++i){
         float newVal = g_fnBaseSlots[i].origFloat * s;
         wnr_log("nameScale: patching base[%d] @ 0x%08X: %.2f * %.2f = %.2f", 
@@ -1569,12 +1759,13 @@ static void fn_apply_scale(){
         fn_write_float(g_fnBaseSlots[i].addr, newVal);
     }
     for(int i = 0; i < g_fnThreshCount; ++i){
-        // Direct multiplication: UI value 0.2-3.0
-        // 0.2 = thresh becomes 0.8 (names shrink very close)
-        // 1.0 = thresh stays 4.0 (default)
-        // 3.0 = thresh becomes 12.0 (names stay big very far)
-        float newVal = g_fnThreshSlots[i].origFloat * ts;
-        wnr_log("nameScale: patching thresh[%d] @ 0x%08X: %.2f * %.2f = %.2f",
+        // Invert threshold: UI value 0.2-3.0
+        // 0.2 = names shrink immediately (thresh becomes 20.0)
+        // 1.0 = default behavior (thresh stays 4.0)
+        // 3.0 = names stay big very far (thresh becomes 1.33)
+        float invertedThresh = g_fnThreshSlots[i].origFloat / ts;
+        float newVal = invertedThresh;
+        wnr_log("nameScale: patching thresh[%d] @ 0x%08X: %.2f / %.2f = %.2f",
                 i, (unsigned)g_fnThreshSlots[i].addr, g_fnThreshSlots[i].origFloat, ts, newVal);
         fn_write_float(g_fnThreshSlots[i].addr, newVal);
     }
@@ -1584,8 +1775,21 @@ static void fn_apply_scale(){
                 i, (unsigned)g_fnDistSlots[i].addr, g_fnDistSlots[i].origFloat, ds, newVal);
         fn_write_float(g_fnDistSlots[i].addr, newVal);
     }
-    wnr_log("nameScale: applied scale=%.2f thresh=%.2f dist=%.2f", s, ts, ds);
+
+    // Optional overhead clamp tweak:
+    // - keep the min clamp unchanged (avoids tiny unreadable text)
+    // - scale the max clamp with nameDistMul so far-distance growth doesn't
+    //   immediately slam into the original 1.6666 cap.
+    if(g_ohClampMaxPatch.armed){
+        float newMax = OH_CLAMP_MAX_EXPECTED * ds;
+        uint32_t bits = *(uint32_t*)&newMax;
+        fn_write_u32_exec(g_ohClampMaxPatch.instrAddr + 3, bits);
+        wnr_log("nameScale: overhead clampMax @0x%08X: %.3f * %.2f = %.3f",
+                (unsigned)g_ohClampMaxPatch.instrAddr, OH_CLAMP_MAX_EXPECTED, ds, newMax);
+    }
+    wnr_log("nameScale: applied scale=%.2f thresh=%.2f dist=%.2f (dynBase=%.3f)", s, ts, ds, g_dynBaseScale);
 }
+
 
 // Restore the original constant values. Called on DLL detach.
 static void fn_restore(){
@@ -1596,6 +1800,10 @@ static void fn_restore(){
         fn_write_float(g_fnThreshSlots[i].addr, g_fnThreshSlots[i].origFloat);
     for(int i = 0; i < g_fnDistCount; ++i)
         fn_write_float(g_fnDistSlots[i].addr, g_fnDistSlots[i].origFloat);
+    fn_restore_fmul_ptr(&g_fnFmulBasePatch);
+    fn_restore_fmul_ptr(&g_ohFmulBasePatch);
+    fn_restore_mov_imm32(&g_ohClampMinPatch);
+    fn_restore_mov_imm32(&g_ohClampMaxPatch);
     g_fnPatched = false;
     wnr_log("nameScale: restored original constants");
 }
@@ -1619,14 +1827,7 @@ static void fn_install(){
         g_fnBaseSlots[i].origFloat = *(float*)baseHits[i];
     }
 
-    // 2) Validate and add the .rdata copy of 0.2f (used in FMUL).
-    if(fn_validate_rdata(FN_RDATA_BASE, FN_RDATA_BASE_EXPECTED, "0.2f rdata")){
-        g_fnBaseSlots[g_fnBaseCount].addr = FN_RDATA_BASE;
-        g_fnBaseSlots[g_fnBaseCount].origFloat = *(float*)FN_RDATA_BASE;
-        g_fnBaseCount++;
-    }
-
-    // 3) Add the 4.0f threshold (FCOM + FDIV) - skip validation, trust the address
+    // 2) Add the 4.0f threshold (FCOM + FDIV) - skip validation, trust the address
     if(!IsBadReadPtr((void*)FN_RDATA_THRESH, sizeof(float))){
         g_fnThreshSlots[0].addr = FN_RDATA_THRESH;
         g_fnThreshSlots[0].origFloat = *(float*)FN_RDATA_THRESH;
@@ -1634,7 +1835,7 @@ static void fn_install(){
         wnr_log("nameScale: 4.0f thresh @ 0x%08X = %.2f", (unsigned)FN_RDATA_THRESH, g_fnThreshSlots[0].origFloat);
     }
 
-    // 4) Add the 1.5f distance multiplier (FMUL) - skip validation, trust the address
+    // 3) Add the 1.5f distance multiplier (FMUL) - skip validation, trust the address
     if(!IsBadReadPtr((void*)FN_RDATA_DISTMUL, sizeof(float))){
         g_fnDistSlots[0].addr = FN_RDATA_DISTMUL;
         g_fnDistSlots[0].origFloat = *(float*)FN_RDATA_DISTMUL;
@@ -1642,11 +1843,21 @@ static void fn_install(){
         wnr_log("nameScale: 1.5f dist @ 0x%08X = %.2f", (unsigned)FN_RDATA_DISTMUL, g_fnDistSlots[0].origFloat);
     }
 
+    // 4) Redirect both pooled-base FMUL instructions (leaves 0x0080679c untouched).
+    fn_patch_fmul_ptr(FN_FMUL_INSTR_ADDR, FN_RDATA_BASE, "FUN_006c6e90", &g_fnFmulBasePatch);
+    fn_patch_fmul_ptr(OH_FMUL_INSTR_ADDR, FN_RDATA_BASE, "FUN_005fa760", &g_ohFmulBasePatch);
+
+    // 5) Optional overhead clamp patch points (only armed if opcode+immediate match).
+    fn_patch_mov_imm32(OH_CLAMP_MIN_INSTR_ADDR, OH_CLAMP_MIN_EXPECTED, "FUN_005fa760 clampMin", &g_ohClampMinPatch);
+    fn_patch_mov_imm32(OH_CLAMP_MAX_INSTR_ADDR, OH_CLAMP_MAX_EXPECTED, "FUN_005fa760 clampMax", &g_ohClampMaxPatch);
+
     g_fnPatched = true;
     if(g_cfg.nameScale != 1.0f || g_cfg.nameThresh != 1.0f || g_cfg.nameDistMul != 1.0f)
         fn_apply_scale();
-    wnr_log("nameScale: ARMED (%d x 0.2f + %d x 4.0f + %d x 1.5f, scale=%.2f thresh=%.2f dist=%.2f)",
+    wnr_log("nameScale: ARMED (%d x 0.2f + %d x 4.0f + %d x 1.5f, fmulRedir=%d/%d clamp=%d/%d, scale=%.2f thresh=%.2f dist=%.2f)",
             g_fnBaseCount, g_fnThreshCount, g_fnDistCount,
+            (int)g_fnFmulBasePatch.armed, (int)g_ohFmulBasePatch.armed,
+            (int)g_ohClampMinPatch.armed, (int)g_ohClampMaxPatch.armed,
             g_cfg.nameScale, g_cfg.nameThresh, g_cfg.nameDistMul);
 }
 
@@ -1960,6 +2171,16 @@ static DWORD WINAPI init(LPVOID){
     // Auto-discovers the 0.2f constant by scanning FUN_006c6e90 at runtime.
     // Self-gating: if the pattern isn't found, stays dormant.
     fn_install();
+
+    // Overhead name diagnostics: hook the final world-text draw call so we can
+    // discover a stable "distance/depth" metric for a non-linear curve scaler.
+    // NOTE: this is safe because logging is off unless WoWRomanizer.debug exists.
+    { const uintptr_t DRAW_ADDR = 0x00672490;
+      if(!IsBadReadPtr((void*)DRAW_ADDR, 8) && !IsBadCodePtr((FARPROC)DRAW_ADDR)){
+          wnr_hook((LPVOID)DRAW_ADDR, (LPVOID)&hk_oh_draw, (LPVOID*)&g_oh_draw_raw, "OverheadDraw(diag)");
+          wnr_log("overhead-draw diag hook ARMED (draw@672490)");
+      } else wnr_log("overhead-draw diag hook SKIPPED (draw@672490 unreadable)");
+    }
     // (v2.5.8+) Attempt the deep C++ leaf SetText hook if user opted in.
     maybe_install_deep_hook();
     wnr_log("CNFixEnglish hooks installed: layered meaning swap + 7 action hooks");
